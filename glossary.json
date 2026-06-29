@@ -24,5 +24,6 @@
   "Batch Normalization": "Batch Normalization",
   "backpropagation": "反向传播",
   "fine-tuning": "fine-tuning",
-  "overfitting": "过拟合"
+  "overfitting": "过拟合",
+  "subject": "被试"
 }

@@ -18,9 +18,10 @@ EQUATION_PLACEHOLDER_PREFIX = "EQPLACEHOLDER"
 
 
 class NatureProcessor(BaseProcessor):
-    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None):
-        super().__init__(html_path, output_dir)
-        self.engine = engine if engine is not None else TranslationEngine()
+    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None,
+                 concurrency: int = 1):
+        super().__init__(html_path, output_dir, concurrency=concurrency)
+        self.engine = engine if engine is not None else TranslationEngine(concurrency=concurrency)
         with open(html_path, "r", encoding="utf-8") as f:
             self.soup = BeautifulSoup(f.read(), "lxml")
         self._title = ""
@@ -66,8 +67,8 @@ class NatureProcessor(BaseProcessor):
             self._extract_meta()
         return self._title
 
-    def _translate(self, text: str) -> str:
-        result = self.engine.translate(text)
+    def _translate(self, text: str, context: str = "") -> str:
+        result = self.engine.translate(text, context=context)
         result = result.replace("[¶SEP¶]", "")
         result = result.replace("[¶SEP¶", "")
         result = result.replace("¶SEP¶]", "")
@@ -125,6 +126,7 @@ class NatureProcessor(BaseProcessor):
         with open(raw_path, "w", encoding="utf-8") as f:
             f.write("".join(paper_parts))
 
+        self.engine.shutdown()
         return md_text
 
     def _process_section(self, section: Tag, md_parts: list[str], paper_parts: list[str]):
@@ -137,6 +139,7 @@ class NatureProcessor(BaseProcessor):
             section_title = normalize_whitespace(section_title)
 
         if section_title:
+            self._current_heading = section_title
             translated_title = self._translate(section_title)
             md_parts.append(f"## {translated_title}\n\n")
             paper_parts.append(f"## {section_title}\n\n")
@@ -156,7 +159,7 @@ class NatureProcessor(BaseProcessor):
             if not paragraphs:
                 return
             raw_paras = list(paragraphs)
-            translated = self.engine.translate_paragraphs(paragraphs)
+            translated = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
             trans_idx = 0
             for pt in plain_texts:
                 if pt.startswith("<p>"):

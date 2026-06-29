@@ -11,9 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class ArxivProcessor(BaseProcessor):
-    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None):
-        super().__init__(html_path, output_dir)
-        self.engine = engine if engine is not None else TranslationEngine()
+    def __init__(
+        self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None,
+        concurrency: int = 1,
+    ):
+        super().__init__(html_path, output_dir, concurrency=concurrency)
+        self.engine = engine if engine is not None else TranslationEngine(concurrency=concurrency)
         with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
             self.soup = BeautifulSoup(f.read(), "lxml")
         self._title = ""
@@ -35,7 +38,9 @@ class ArxivProcessor(BaseProcessor):
             self._title = clean_html_entities(title_tag.get_text(strip=True))
 
         author_names = []
-        for author_el in self.soup.select("span.ltx_creator.ltx_role_author span.ltx_personname"):
+        for author_el in self.soup.select(
+            "span.ltx_creator.ltx_role_author span.ltx_personname"
+        ):
             name = clean_html_entities(author_el.get_text(strip=True))
             name = normalize_whitespace(name)
             if name:
@@ -53,8 +58,8 @@ class ArxivProcessor(BaseProcessor):
             self._extract_meta()
         return self._title
 
-    def _translate(self, text: str) -> str:
-        result = self.engine.translate(text)
+    def _translate(self, text: str, context: str = "") -> str:
+        result = self.engine.translate(text, context=context)
         result = result.replace("[¶SEP¶]", "")
         result = result.replace("[¶SEP¶", "")
         result = result.replace("¶SEP¶]", "")
@@ -91,7 +96,7 @@ class ArxivProcessor(BaseProcessor):
             if not paragraphs:
                 return
             raw_batch = list(paragraphs)
-            translated = self.engine.translate_paragraphs(paragraphs)
+            translated = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
             t_idx = 0
             for pt in plain_texts:
                 if pt.startswith("<p>"):
@@ -122,14 +127,18 @@ class ArxivProcessor(BaseProcessor):
 
             if child.name == "section":
                 sec_id = child.get("id", "")
-                sec_class = child.get("class", [])
+                sec_class = child.get("class", None)
+                if sec_class is None:
+                    continue
 
                 if sec_id == "bib" or "ltx_bibliography" in sec_class:
                     break
                 if "ltx_appendix" in sec_class:
                     break
 
-                self._process_arxiv_section(child, md_parts, paper_parts, paragraphs, plain_texts, flush)
+                self._process_arxiv_section(
+                    child, md_parts, paper_parts, paragraphs, plain_texts, flush
+                )
 
         flush()
 
@@ -140,6 +149,7 @@ class ArxivProcessor(BaseProcessor):
             paper_text = paper_text.replace(key, value)
 
         self._write_paper(paper_text)
+        self.engine.shutdown()
         return md_text
 
     def _write_paper(self, paper_text: str):
@@ -169,12 +179,19 @@ class ArxivProcessor(BaseProcessor):
 
         if texts:
             abstract_text = " ".join(texts)
-            translated = self._translate(abstract_text)
+            translated = self._translate(abstract_text, context="摘要")
             md_parts.append(f"## 摘要\n\n{translated}\n\n")
             paper_parts.append(f"## Abstract\n\n{abstract_text}\n\n")
 
-    def _process_arxiv_section(self, section: Tag, md_parts: list[str], paper_parts: list[str],
-                                paragraphs: list[str], plain_texts: list[str], flush_fn):
+    def _process_arxiv_section(
+        self,
+        section: Tag,
+        md_parts: list[str],
+        paper_parts: list[str],
+        paragraphs: list[str],
+        plain_texts: list[str],
+        flush_fn,
+    ):
         h2 = section.find("h2", class_="ltx_title_section")
         heading_text = ""
         if h2:
@@ -183,14 +200,25 @@ class ArxivProcessor(BaseProcessor):
 
         if heading_text:
             flush_fn()
+            self._current_heading = heading_text
             translated_heading = self._translate(heading_text)
             md_parts.append(f"## {translated_heading}\n\n")
             paper_parts.append(f"## {heading_text}\n\n")
 
-        self._process_section_children(section, md_parts, paper_parts, paragraphs, plain_texts, flush_fn)
+        self._process_section_children(
+            section, md_parts, paper_parts, paragraphs, plain_texts, flush_fn
+        )
 
-    def _process_section_children(self, parent: Tag, md_parts: list[str], paper_parts: list[str],
-                                   paragraphs: list[str], plain_texts: list[str], flush_fn, depth: int = 0):
+    def _process_section_children(
+        self,
+        parent: Tag,
+        md_parts: list[str],
+        paper_parts: list[str],
+        paragraphs: list[str],
+        plain_texts: list[str],
+        flush_fn,
+        depth: int = 0,
+    ):
         if depth > 3:
             return
 
@@ -200,7 +228,9 @@ class ArxivProcessor(BaseProcessor):
             if not isinstance(child, Tag):
                 continue
 
-            child_class = child.get("class", [])
+            child_class = child.get("class", None)
+            if child_class is None:
+                continue
 
             if child.name == "section" and "ltx_subsection" in child_class:
                 h3 = child.find("h3", class_="ltx_title_subsection")
@@ -211,22 +241,37 @@ class ArxivProcessor(BaseProcessor):
 
                 if subsection_heading:
                     flush_fn()
+                    self._current_heading = subsection_heading
                     translated_heading = self._translate(subsection_heading)
                     md_parts.append(f"### {translated_heading}\n\n")
                     paper_parts.append(f"### {subsection_heading}\n\n")
 
                 self._process_section_children(
-                    child, md_parts, paper_parts, paragraphs, plain_texts, flush_fn, depth + 1
+                    child,
+                    md_parts,
+                    paper_parts,
+                    paragraphs,
+                    plain_texts,
+                    flush_fn,
+                    depth + 1,
                 )
 
             elif child.name == "div" and "ltx_para" in child_class:
                 flush_fn()
                 for sub in child.children:
-                    if isinstance(sub, Tag) and sub.name == "p" and "ltx_p" in (sub.get("class") or []):
+                    if (
+                        isinstance(sub, Tag)
+                        and sub.name == "p"
+                        and "ltx_p" in (sub.get("class") or [])
+                    ):
                         self._process_arxiv_paragraph(sub, paragraphs, plain_texts)
-                    elif isinstance(sub, Tag) and sub.name == "table" and (
-                        "ltx_equation" in (sub.get("class") or [])
-                        or "ltx_equationgroup" in (sub.get("class") or [])
+                    elif (
+                        isinstance(sub, Tag)
+                        and sub.name == "table"
+                        and (
+                            "ltx_equation" in (sub.get("class") or [])
+                            or "ltx_equationgroup" in (sub.get("class") or [])
+                        )
                     ):
                         for formula in self._extract_display_formulas(sub):
                             plain_texts.append(f"<math_block>{formula}</math_block>")
@@ -261,7 +306,9 @@ class ArxivProcessor(BaseProcessor):
                     for li_p in li.find_all("p", class_="ltx_p"):
                         self._process_arxiv_paragraph(li_p, paragraphs, plain_texts)
 
-    def _process_arxiv_paragraph(self, p: Tag, paragraphs: list[str], plain_texts: list[str]):
+    def _process_arxiv_paragraph(
+        self, p: Tag, paragraphs: list[str], plain_texts: list[str]
+    ):
         for math_el in p.find_all("math", display="inline"):
             self._replace_inline_math(math_el)
 
@@ -284,7 +331,7 @@ class ArxivProcessor(BaseProcessor):
         if annotation and annotation.string:
             return annotation.string.strip()
         alttext = math_el.get("alttext", "")
-        if alttext:
+        if alttext and isinstance(alttext, str):
             return alttext.strip()
         return None
 

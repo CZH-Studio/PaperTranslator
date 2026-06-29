@@ -4,8 +4,14 @@ import time
 import os
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
-from config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from config import (
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL_TRANSLATOR,
+    OPENAI_MODEL_SUMMARIZER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +37,16 @@ SUMMARIZE_SYSTEM_PROMPT = """你是一位专业的学术论文解读专家。你
 简要说明该论文研究的领域、背景以及要解决的核心问题。
 
 ## 核心创新点
-列出该论文的主要创新和贡献，每条用通俗易懂的语言说明。
+列出该论文的主要创新和贡献，每条用通俗易懂的语言说明。每条包含：(1) 该创新点的核心思想（一句话概括）；(2) 为什么这个创新很重要，它解决了什么问题。
 
 ## 研究方法
-简述该论文采用的主要实验方法、技术手段或理论框架。
+简述该论文采用的主要实验方法、技术手段或理论框架。对于关键的技术术语，用通俗语言简单解释其含义。
 
 ## 关键结论
-列出该论文最重要的发现和结论。
+列出该论文最重要的发现和结论。每条结论请遵循以下格式：先用一句话概括核心发现，然后补充2-3句通俗的解释性文字，说明该结论的含义、重要性或应用价值。对于晦涩的专业术语，请在解释中自然融入其含义，帮助非该领域读者理解。
 
 ## 局限性
-指出该论文存在的不足之处或未来可改进的方向。
+指出该论文存在的不足之处或未来可改进的方向。每条局限性附加一句简短解释，说明为什么这会成为问题。
 
 要求：
 1. 语言要通俗易懂，但保持专业性，让非该领域读者也能理解。
@@ -68,8 +74,9 @@ _GLOSSARY_ITEMS, _GLOSSARY_PATTERN = _load_glossary()
 
 
 class TranslationEngine:
-    def __init__(self):
+    def __init__(self, concurrency: int = 1):
         import httpx
+
         proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
         http_client = httpx.Client(
             trust_env=False,
@@ -80,7 +87,18 @@ class TranslationEngine:
             base_url=OPENAI_BASE_URL,
             http_client=http_client,
         )
-        self.model = OPENAI_MODEL.strip('"')
+        self.model_translator = OPENAI_MODEL_TRANSLATOR.strip('"')
+        self.model_summarizer = OPENAI_MODEL_SUMMARIZER.strip('"')
+        self.concurrency = max(1, concurrency)
+        if self.concurrency > 1:
+            self._executor = ThreadPoolExecutor(max_workers=self.concurrency)
+        else:
+            self._executor = None
+
+    def shutdown(self):
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
 
     @staticmethod
     def _apply_glossary(text: str) -> tuple[str, dict[str, str]]:
@@ -93,7 +111,9 @@ class TranslationEngine:
             nonlocal idx
             term = m.group(0)
             if term not in mapping:
-                mapping[f"[G_{idx}]"] = _GLOSSARY_ITEMS[[k for k, _ in _GLOSSARY_ITEMS].index(term)][1]
+                mapping[f"[G_{idx}]"] = _GLOSSARY_ITEMS[
+                    [k for k, _ in _GLOSSARY_ITEMS].index(term)
+                ][1]
                 idx += 1
             for k, v in mapping.items():
                 if v == _GLOSSARY_ITEMS[[k for k, _ in _GLOSSARY_ITEMS].index(term)][1]:
@@ -132,11 +152,14 @@ class TranslationEngine:
             text = text.replace(placeholder, term)
         return text
 
-    def translate(self, text: str, max_retries: int = 3) -> str:
+    def translate(self, text: str, context: str = "", max_retries: int = 3) -> str:
         if not text.strip():
             return text
         protected, mapping = self._apply_glossary_bulk(text)
+        if context:
+            protected = f"当前翻译内容来自文章「{context}」：\n\n{protected}"
         result = self._call_api(
+            model=self.model_translator,
             system_prompt=TRANSLATE_SYSTEM_PROMPT,
             user_message=protected,
             temperature=0.1,
@@ -149,6 +172,7 @@ class TranslationEngine:
         if not content.strip():
             return ""
         return self._call_api(
+            model=self.model_summarizer,
             system_prompt=SUMMARIZE_SYSTEM_PROMPT,
             user_message=content,
             temperature=0.1,
@@ -158,6 +182,7 @@ class TranslationEngine:
 
     def _call_api(
         self,
+        model: str,
         system_prompt: str,
         user_message: str,
         temperature: float,
@@ -168,7 +193,7 @@ class TranslationEngine:
         for attempt in range(max_retries):
             try:
                 response = self.client.chat.completions.create(
-                    model=self.model,
+                    model=model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},
@@ -184,15 +209,19 @@ class TranslationEngine:
                 logger.warning(f"API call attempt {attempt + 1} failed: {e}")
                 last_error = e
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-        raise RuntimeError(f"API call failed after {max_retries} attempts: {last_error}")
+                    time.sleep(2**attempt)
+        raise RuntimeError(
+            f"API call failed after {max_retries} attempts: {last_error}"
+        )
 
-    def translate_paragraphs(self, paragraphs: list[str], sep: str = "[¶SEP¶]") -> list[str]:
+    def translate_paragraphs(
+        self, paragraphs: list[str], context: str = "", sep: str = "[¶SEP¶]"
+    ) -> list[str]:
         if not paragraphs:
             return []
 
         joined = sep.join(paragraphs)
-        translated = self.translate(joined)
+        translated = self.translate(joined, context=context)
         translated = translated.replace(sep, sep)
         translated_parts = translated.split(sep)
 
@@ -209,7 +238,20 @@ class TranslationEngine:
             f"Paragraph count mismatch: expected {len(paragraphs)}, got {len(translated_parts)}. "
             f"Falling back to individual translation."
         )
+
+        if self.concurrency > 1 and self._executor is not None:
+            futures = {}
+            for i, para in enumerate(paragraphs):
+                futures[self._executor.submit(
+                    self.translate, para, context=context
+                )] = i
+            results: list[str] = [""] * len(paragraphs)
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = _clean(future.result())
+            return results
+
         results = []
         for para in paragraphs:
-            results.append(_clean(self.translate(para)))
+            results.append(_clean(self.translate(para, context=context)))
         return results

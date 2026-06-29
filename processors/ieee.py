@@ -13,9 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class IEEEXploreProcessor(BaseProcessor):
-    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None):
-        super().__init__(html_path, output_dir)
-        self.engine = engine if engine is not None else TranslationEngine()
+    def __init__(
+        self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None,
+        concurrency: int = 1,
+    ):
+        super().__init__(html_path, output_dir, concurrency=concurrency)
+        self.engine = engine if engine is not None else TranslationEngine(concurrency=concurrency)
         with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
             self.soup = BeautifulSoup(f.read(), "lxml")
         self._title = ""
@@ -38,7 +41,11 @@ class IEEEXploreProcessor(BaseProcessor):
 
         meta_title = self.soup.select_one("meta[property='og:title']")
         if meta_title:
-            self._title = meta_title.get("content", "").strip() or self._title
+            _title = meta_title.get("content", "")
+            if not isinstance(_title, str):
+                self._title = ""
+            else:
+                self._title = _title.strip() or self._title
 
         self._authors = self._extract_authors_from_js()
 
@@ -66,14 +73,18 @@ class IEEEXploreProcessor(BaseProcessor):
             if authors_str:
                 try:
                     data = json.loads(f'{{"authors":{authors_str}}}')
-                    names = [a["name"].strip() for a in data.get("authors", []) if isinstance(a, dict) and a.get("name")]
+                    names = [
+                        a["name"].strip()
+                        for a in data.get("authors", [])
+                        if isinstance(a, dict) and a.get("name")
+                    ]
                     return ", ".join(names)
                 except json.JSONDecodeError:
                     pass
 
             idx = text.find('"authors"')
             if idx > 0:
-                nearby = text[idx:idx + 2000]
+                nearby = text[idx : idx + 2000]
                 names = re.findall(r'"name"\s*:\s*"([^"]+)"', nearby)
                 seen = set()
                 result = []
@@ -92,7 +103,7 @@ class IEEEXploreProcessor(BaseProcessor):
         if idx < 0:
             return None
 
-        after_field = text[idx + len(field_name) + 2:]
+        after_field = text[idx + len(field_name) + 2 :]
         after_field = after_field.lstrip()
         if not after_field.startswith(":"):
             return None
@@ -107,12 +118,12 @@ class IEEEXploreProcessor(BaseProcessor):
             elif ch == "]":
                 bracket_count -= 1
                 if bracket_count == 0:
-                    return after_field[:i + 1]
+                    return after_field[: i + 1]
 
         return None
 
-    def _translate(self, text: str) -> str:
-        result = self.engine.translate(text)
+    def _translate(self, text: str, context: str = "") -> str:
+        result = self.engine.translate(text, context=context)
         result = result.replace("[¶SEP¶]", "")
         result = result.replace("[¶SEP¶", "")
         result = result.replace("¶SEP¶]", "")
@@ -162,7 +173,7 @@ class IEEEXploreProcessor(BaseProcessor):
             if not paragraphs:
                 return
             raw_batch = list(paragraphs)
-            translated = self.engine.translate_paragraphs(paragraphs)
+            translated = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
             t_idx = 0
             for pt in plain_texts:
                 if pt.startswith("<p>"):
@@ -192,14 +203,21 @@ class IEEEXploreProcessor(BaseProcessor):
             classes = child.get("class") or []
 
             if "section" in classes:
-                self._process_ieee_section(child, paragraphs, plain_texts, md_parts, paper_parts, flush)
+                self._process_ieee_section(
+                    child, paragraphs, plain_texts, md_parts, paper_parts, flush
+                )
             elif "section_2" in classes:
-                self._process_ieee_subsection(child, paragraphs, plain_texts, md_parts, paper_parts, flush)
+                self._process_ieee_subsection(
+                    child, paragraphs, plain_texts, md_parts, paper_parts, flush
+                )
             elif "figure" in classes:
                 flush()
                 fig_html = self._process_ieee_figure(child)
                 plain_texts.append(fig_html)
-            elif child.name == "h3" and "ACKNOWLEDGMENT" in child.get_text(strip=True).upper():
+            elif (
+                child.name == "h3"
+                and "ACKNOWLEDGMENT" in child.get_text(strip=True).upper()
+            ):
                 break
 
         flush()
@@ -211,6 +229,7 @@ class IEEEXploreProcessor(BaseProcessor):
             paper_text = paper_text.replace(key, value)
 
         self._write_paper(paper_text)
+        self.engine.shutdown()
         return md_text
 
     def _write_paper(self, paper_text: str):
@@ -218,7 +237,9 @@ class IEEEXploreProcessor(BaseProcessor):
         with open(raw_path, "w", encoding="utf-8") as f:
             f.write(paper_text)
 
-    def _process_ieee_section(self, section: Tag, paragraphs, plain_texts, md_parts, paper_parts, flush_fn):
+    def _process_ieee_section(
+        self, section: Tag, paragraphs, plain_texts, md_parts, paper_parts, flush_fn
+    ):
         header = section.find("div", class_="header")
         h2 = section.find("h2")
         if h2:
@@ -226,26 +247,43 @@ class IEEEXploreProcessor(BaseProcessor):
             heading_text = normalize_whitespace(heading_text)
             if heading_text:
                 flush_fn()
+                self._current_heading = heading_text
                 translated_heading = self._translate(heading_text)
                 md_parts.append(f"## {translated_heading}\n\n")
                 paper_parts.append(f"## {heading_text}\n\n")
 
-        self._process_section_children(section, paragraphs, plain_texts, md_parts, paper_parts, flush_fn)
+        self._process_section_children(
+            section, paragraphs, plain_texts, md_parts, paper_parts, flush_fn
+        )
 
-    def _process_ieee_subsection(self, subsection: Tag, paragraphs, plain_texts, md_parts, paper_parts, flush_fn):
+    def _process_ieee_subsection(
+        self, subsection: Tag, paragraphs, plain_texts, md_parts, paper_parts, flush_fn
+    ):
         h3 = subsection.find("h3")
         if h3:
             heading_text = clean_html_entities(h3.get_text(strip=True))
             heading_text = normalize_whitespace(heading_text)
             if heading_text:
                 flush_fn()
+                self._current_heading = heading_text
                 translated_heading = self._translate(heading_text)
                 md_parts.append(f"### {translated_heading}\n\n")
                 paper_parts.append(f"### {heading_text}\n\n")
 
-        self._process_section_children(subsection, paragraphs, plain_texts, md_parts, paper_parts, flush_fn)
+        self._process_section_children(
+            subsection, paragraphs, plain_texts, md_parts, paper_parts, flush_fn
+        )
 
-    def _process_section_children(self, parent: Tag, paragraphs, plain_texts, md_parts, paper_parts, flush_fn, depth: int = 0):
+    def _process_section_children(
+        self,
+        parent: Tag,
+        paragraphs,
+        plain_texts,
+        md_parts,
+        paper_parts,
+        flush_fn,
+        depth: int = 0,
+    ):
         if depth > 2:
             return
         for child in parent.children:
@@ -259,7 +297,9 @@ class IEEEXploreProcessor(BaseProcessor):
             if child.name == "p":
                 self._process_ieee_paragraph(child, paragraphs, plain_texts)
             elif "section_2" in classes and depth == 0:
-                self._process_ieee_subsection(child, paragraphs, plain_texts, md_parts, paper_parts, flush_fn)
+                self._process_ieee_subsection(
+                    child, paragraphs, plain_texts, md_parts, paper_parts, flush_fn
+                )
             elif "figure" in classes:
                 flush_fn()
                 fig_html = self._process_ieee_figure(child)
@@ -268,7 +308,11 @@ class IEEEXploreProcessor(BaseProcessor):
                 flush_fn()
             elif "header" in classes:
                 continue
-            elif "table" in classes or (child.name == "div" and child.get("id") and "table" in str(child.get("id", ""))):
+            elif "table" in classes or (
+                child.name == "div"
+                and child.get("id")
+                and "table" in str(child.get("id", ""))
+            ):
                 flush_fn()
                 caption = child.find("div", class_="table-caption")
                 if caption:
@@ -282,7 +326,9 @@ class IEEEXploreProcessor(BaseProcessor):
                     if item:
                         self._process_ieee_paragraph(item, paragraphs, plain_texts)
 
-    def _process_ieee_paragraph(self, p: Tag, paragraphs: list[str], plain_texts: list[str]):
+    def _process_ieee_paragraph(
+        self, p: Tag, paragraphs: list[str], plain_texts: list[str]
+    ):
         self._replace_inline_formulas(p)
 
         text = clean_html_entities(p.get_text(" ", strip=True))

@@ -25,9 +25,10 @@ STOP_HEADINGS = [
 
 
 class BiorxivProcessor(BaseProcessor):
-    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None):
-        super().__init__(html_path, output_dir)
-        self.engine = engine if engine is not None else TranslationEngine()
+    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None,
+                 concurrency: int = 1):
+        super().__init__(html_path, output_dir, concurrency=concurrency)
+        self.engine = engine if engine is not None else TranslationEngine(concurrency=concurrency)
         with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
             self.soup = BeautifulSoup(f.read(), "lxml")
         self._title = ""
@@ -83,8 +84,8 @@ class BiorxivProcessor(BaseProcessor):
             self._extract_meta()
         return self._title
 
-    def _translate(self, text: str) -> str:
-        result = self.engine.translate(text)
+    def _translate(self, text: str, context: str = "") -> str:
+        result = self.engine.translate(text, context=context)
         result = result.replace("[¶SEP¶]", "")
         result = result.replace("[¶SEP¶", "")
         result = result.replace("¶SEP¶]", "")
@@ -146,6 +147,7 @@ class BiorxivProcessor(BaseProcessor):
         with open(raw_path, "w", encoding="utf-8") as f:
             f.write("".join(paper_parts))
 
+        self.engine.shutdown()
         return "".join(md_parts)
 
     def _write_paper(self, paper_text: str):
@@ -165,12 +167,13 @@ class BiorxivProcessor(BaseProcessor):
 
         if texts:
             abstract_text = " ".join(texts)
-            translated = self._translate(abstract_text)
+            translated = self._translate(abstract_text, context="摘要")
             md_parts.append(f"## 摘要\n\n{translated}\n\n")
             paper_parts.append(f"## Abstract\n\n{abstract_text}\n\n")
 
     def _process_content_section(self, section: Tag, heading_level: str, heading: str,
                                   md_parts: list[str], paper_parts: list[str]):
+        self._current_heading = heading
         translated_heading = self._translate(heading)
         if heading_level == "h2":
             md_parts.append(f"## {translated_heading}\n\n")
@@ -191,13 +194,14 @@ class BiorxivProcessor(BaseProcessor):
                 if heading_level == "h3":
                     continue
                 if paragraphs:
-                    translated_paras = self.engine.translate_paragraphs(paragraphs)
+                    translated_paras = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
                     self._append_paragraphs(translated_paras, paragraphs, md_parts, paper_parts)
                     paragraphs.clear()
 
                 sub_heading = clean_html_entities(child.get_text(strip=True))
                 sub_heading = normalize_whitespace(sub_heading)
                 if sub_heading:
+                    self._current_heading = sub_heading
                     translated_sub = self._translate(sub_heading)
                     md_parts.append(f"### {translated_sub}\n\n")
                     paper_parts.append(f"### {sub_heading}\n\n")

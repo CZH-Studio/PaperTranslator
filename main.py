@@ -11,6 +11,7 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -20,7 +21,7 @@ def main():
     parser.add_argument(
         "input",
         nargs="?",
-        help="URL (https://www.nature.com/articles/...) or path to a local HTML file",
+        help="URL or path to a local HTML file",
     )
     parser.add_argument(
         "--output-dir",
@@ -37,19 +38,37 @@ def main():
         metavar="PATH",
         help="Only generate summary for an existing translation (path to translation.md or its parent directory)",
     )
+    parser.add_argument(
+        "-c",
+        "--concurrency",
+        type=int,
+        default=10,
+        help="Number of concurrent translation requests (default: 10)",
+    )
     args = parser.parse_args()
 
     if args.summarize_only:
         return cmd_summarize(args.summarize_only)
 
     if not args.input:
-        parser.error("Either provide an input file/URL or use --summarize-only")
+        print("请输入论文 URL 或本地 HTML 文件路径：", end=" ", flush=True)
+        args.input = input().strip()
+        if args.input.startswith('"') and args.input.endswith('"'):
+            args.input = args.input[1:-1]
+        if not args.input:
+            logger.error("No input provided, exiting.")
+            sys.exit(1)
 
     try:
-        md_path = route(args.input, args.output_dir, skip_summary=args.no_summary)
-        print(f"Translation saved to: {md_path}")
+        md_path = route(
+            args.input,
+            args.output_dir,
+            skip_summary=args.no_summary,
+            concurrency=args.concurrency,
+        )
+        logger.info(f"Translation saved to: {md_path}")
     except Exception as e:
-        logging.getLogger(__name__).error(str(e))
+        logger.error(str(e))
         sys.exit(1)
 
 
@@ -62,13 +81,12 @@ def cmd_summarize(target: str):
         md_path = target
 
     if not os.path.isfile(md_path):
-        print(f"Error: translation.md not found at {md_path}")
+        logger.error(f"Error: translation.md not found at {md_path}")
         sys.exit(1)
 
     parent_dir = os.path.dirname(md_path)
     summary_path = os.path.join(parent_dir, "summary.md")
 
-    logger = logging.getLogger(__name__)
     logger.info("Generating summary from existing translation...")
     summary = summarize_markdown(md_path)
 
@@ -76,7 +94,6 @@ def cmd_summarize(target: str):
         f.write(summary)
 
     logger.info(f"Summary saved to: {summary_path}")
-    print(f"Summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":

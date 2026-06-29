@@ -23,9 +23,10 @@ STOP_SECTIONS = [
 
 
 class ScienceDirectProcessor(BaseProcessor):
-    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None):
-        super().__init__(html_path, output_dir)
-        self.engine = engine if engine is not None else TranslationEngine()
+    def __init__(self, html_path: str, output_dir: Path, engine: TranslationEngine | None = None,
+                 concurrency: int = 1):
+        super().__init__(html_path, output_dir, concurrency=concurrency)
+        self.engine = engine if engine is not None else TranslationEngine(concurrency=concurrency)
         with open(html_path, "r", encoding="utf-8") as f:
             self.soup = BeautifulSoup(f.read(), "lxml")
         self._title = ""
@@ -101,8 +102,8 @@ class ScienceDirectProcessor(BaseProcessor):
         if doi_meta:
             self._doi = str(doi_meta.get("content", "")).strip()
 
-    def _translate(self, text: str) -> str:
-        result = self.engine.translate(text)
+    def _translate(self, text: str, context: str = "") -> str:
+        result = self.engine.translate(text, context=context)
         result = result.replace("[¶SEP¶]", "")
         result = result.replace("[¶SEP¶", "")
         result = result.replace("¶SEP¶]", "")
@@ -137,6 +138,7 @@ class ScienceDirectProcessor(BaseProcessor):
         with open(raw_path, "w", encoding="utf-8") as f:
             f.write("".join(paper_parts))
 
+        self.engine.shutdown()
         return "".join(md_parts)
 
     def _process_abstract(self, md_parts: list[str], paper_parts: list[str]):
@@ -153,7 +155,7 @@ class ScienceDirectProcessor(BaseProcessor):
         if not abstract_text:
             return
 
-        translated = self._translate(abstract_text)
+        translated = self._translate(abstract_text, context="摘要")
         md_parts.append(f"## 摘要\n\n{translated}\n\n")
         paper_parts.append(f"## Abstract\n\n{abstract_text}\n\n")
 
@@ -182,6 +184,7 @@ class ScienceDirectProcessor(BaseProcessor):
                 break
 
             translated_heading = self._translate(heading_text)
+            self._current_heading = heading_text
             md_parts.append(f"## {translated_heading}\n\n")
             paper_parts.append(f"## {heading_text}\n\n")
 
@@ -194,7 +197,7 @@ class ScienceDirectProcessor(BaseProcessor):
                     paragraphs.append(text)
 
             if paragraphs:
-                translated_paras = self.engine.translate_paragraphs(paragraphs)
+                translated_paras = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
                 for i, tp in enumerate(translated_paras):
                     tp = tp.replace("[¶SEP¶]", "")
                     tp = tp.replace("[¶SEP¶", "")
