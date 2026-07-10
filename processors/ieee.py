@@ -7,7 +7,7 @@ from bs4.element import NavigableString
 
 from processors.base import BaseProcessor
 from engine import TranslationEngine
-from utils.text_utils import clean_html_entities, normalize_whitespace
+from utils.text_utils import clean_html_entities, normalize_whitespace, clean_math_formula
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +341,7 @@ class IEEEXploreProcessor(BaseProcessor):
         for inline_formula in element.find_all("inline-formula"):
             script = inline_formula.find("script", attrs={"type": "math/tex"})
             if script and script.string:
-                formula = script.string.strip()
+                formula = clean_math_formula(script.string)
                 placeholder = self._make_placeholder("MATH", f"${formula}$")
                 inline_formula.replace_with(f" {placeholder} ")
             else:

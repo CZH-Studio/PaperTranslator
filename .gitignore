@@ -5,3 +5,5 @@ output/
 
 .vscode/
 .idea/
+.omo/
+.codegraph

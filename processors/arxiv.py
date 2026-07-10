@@ -5,7 +5,7 @@ from bs4.element import NavigableString
 
 from processors.base import BaseProcessor
 from engine import TranslationEngine
-from utils.text_utils import clean_html_entities, normalize_whitespace
+from utils.text_utils import clean_html_entities, normalize_whitespace, clean_math_formula
 
 logger = logging.getLogger(__name__)
 
@@ -329,10 +329,10 @@ class ArxivProcessor(BaseProcessor):
     def _extract_formula(self, math_el: Tag) -> str | None:
         annotation = math_el.find("annotation", attrs={"encoding": "application/x-tex"})
         if annotation and annotation.string:
-            return annotation.string.strip()
+            return clean_math_formula(annotation.string)
         alttext = math_el.get("alttext", "")
         if alttext and isinstance(alttext, str):
-            return alttext.strip()
+            return clean_math_formula(alttext)
         return None
 
     def _extract_display_formulas(self, table: Tag) -> list[str]:

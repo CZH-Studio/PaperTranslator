@@ -9,6 +9,7 @@ from utils.file_utils import (
     download_with_wget,
     copy_file_to_output,
     sanitize_filename,
+    relocate_assets,
 )
 from config import OPENAI_MODEL_TRANSLATOR
 
@@ -61,7 +62,12 @@ def _route_file(filepath: str, output_base: str, skip_summary: bool,
     html_path = copy_file_to_output(filepath, str(output_dir), f"raw.html")
     logger.info(f"Copied HTML to {html_path}")
 
-    return _translate_and_summarize(html_path, output_dir, skip_summary, concurrency)
+    md_path = _translate_and_summarize(html_path, output_dir, skip_summary, concurrency)
+    n = relocate_assets(filepath, output_dir)
+    if n > 0:
+        logger.info(f"Relocated {n} asset(s) to {output_dir / 'assets'}")
+
+    return str(md_path)
 
 
 def _translate_and_summarize(
@@ -85,6 +91,10 @@ def _translate_and_summarize(
         md_path = _process_pnas(html_path, output_dir, concurrency)
     else:
         md_path = _process_nature(html_path, output_dir, concurrency)
+
+    n = relocate_assets(html_path, output_dir)
+    if n > 0:
+        logger.info(f"Relocated {n} asset(s) to {output_dir / 'assets'}")
 
     if not skip_summary:
         _run_summarizer(output_dir, md_path)

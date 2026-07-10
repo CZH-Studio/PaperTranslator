@@ -6,7 +6,7 @@ from bs4.element import NavigableString
 
 from processors.base import BaseProcessor
 from engine import TranslationEngine
-from utils.text_utils import clean_html_entities, normalize_whitespace
+from utils.text_utils import clean_html_entities, normalize_whitespace, clean_math_formula
 from utils.file_utils import sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -101,56 +101,6 @@ class NatureProcessor(BaseProcessor):
                          "Supplementary information", "Rights and permissions",
                          "About this article"}
 
-        for section in article_body.find_all("section", recursive=False):
-            data_title = section.get("data-title", "")
-            aria_label = section.get("aria-labelledby", "")
-
-            if data_title == "Inline Recommendations":
-                continue
-            if data_title in stop_sections or aria_label in ("Bib1", "author-information"):
-                break
-
-            if data_title:
-                self._process_section(section, md_parts, paper_parts)
-
-        main_content = article_body.select_one("div.main-content")
-        if main_content:
-            for section in main_content.find_all("section", recursive=False):
-                self._process_section(section, md_parts, paper_parts)
-
-        md_text = "".join(md_parts)
-        for key, value in self._placeholders.items():
-            md_text = md_text.replace(key, value)
-
-        raw_path = self.output_dir / "paper.md"
-        with open(raw_path, "w", encoding="utf-8") as f:
-            f.write("".join(paper_parts))
-
-        self.engine.shutdown()
-        return md_text
-
-    def _process_section(self, section: Tag, md_parts: list[str], paper_parts: list[str]):
-        section_title_tag = section.select_one(
-            ".c-article-section__title, h2[data-test='article-section-heading']"
-        )
-        section_title = ""
-        if section_title_tag:
-            section_title = clean_html_entities(section_title_tag.get_text(strip=True))
-            section_title = normalize_whitespace(section_title)
-
-        if section_title:
-            self._current_heading = section_title
-            translated_title = self._translate(section_title)
-            md_parts.append(f"## {translated_title}\n\n")
-            paper_parts.append(f"## {section_title}\n\n")
-        else:
-            md_parts.append("## \n\n")
-            paper_parts.append("## \n\n")
-
-        content_div = section.select_one(".c-article-section__content")
-        if not content_div:
-            return
-
         paragraphs: list[str] = []
         plain_texts: list[str] = []
 
@@ -188,6 +138,61 @@ class NatureProcessor(BaseProcessor):
                     paper_parts.append(f"{pt}\n\n")
             paragraphs.clear()
             plain_texts.clear()
+
+        for section in article_body.find_all("section", recursive=False):
+            data_title = section.get("data-title", "")
+            aria_label = section.get("aria-labelledby", "")
+
+            if data_title == "Inline Recommendations":
+                continue
+            if data_title in stop_sections or aria_label in ("Bib1", "author-information"):
+                break
+
+            if data_title:
+                self._process_section(section, md_parts, paper_parts,
+                                      paragraphs, plain_texts, flush_paragraphs)
+
+        main_content = article_body.select_one("div.main-content")
+        if main_content:
+            for section in main_content.find_all("section", recursive=False):
+                self._process_section(section, md_parts, paper_parts,
+                                      paragraphs, plain_texts, flush_paragraphs)
+
+        flush_paragraphs()
+
+        md_text = "".join(md_parts)
+        for key, value in self._placeholders.items():
+            md_text = md_text.replace(key, value)
+
+        raw_path = self.output_dir / "paper.md"
+        with open(raw_path, "w", encoding="utf-8") as f:
+            f.write("".join(paper_parts))
+
+        self.engine.shutdown()
+        return md_text
+
+    def _process_section(self, section: Tag, md_parts: list[str], paper_parts: list[str],
+                          paragraphs: list[str], plain_texts: list[str], flush_paragraphs):
+        section_title_tag = section.select_one(
+            ".c-article-section__title, h2[data-test='article-section-heading']"
+        )
+        section_title = ""
+        if section_title_tag:
+            section_title = clean_html_entities(section_title_tag.get_text(strip=True))
+            section_title = normalize_whitespace(section_title)
+
+        if section_title:
+            self._current_heading = section_title
+            translated_title = self._translate(section_title)
+            md_parts.append(f"## {translated_title}\n\n")
+            paper_parts.append(f"## {section_title}\n\n")
+        else:
+            md_parts.append("## \n\n")
+            paper_parts.append("## \n\n")
+
+        content_div = section.select_one(".c-article-section__content")
+        if not content_div:
+            return
 
         for child in content_div.children:
             if isinstance(child, NavigableString):
@@ -233,12 +238,10 @@ class NatureProcessor(BaseProcessor):
                             eq_text = self._process_equation(sub_child)
                             plain_texts.append(eq_text)
 
-        flush_paragraphs()
-
     def _process_paragraph(self, p: Tag, paragraphs: list[str], plain_texts: list[str]):
         for eq_span in p.select("span.mathjax-tex"):
             eq_content = eq_span.get_text(strip=True)
-            eq_content = re.sub(r'^\$+|\$+$', '', eq_content)
+            eq_content = clean_math_formula(eq_content)
             placeholder = self._make_placeholder("MATH", f"${eq_content}$")
             eq_span.replace_with(f" {placeholder} ")
 
@@ -291,7 +294,7 @@ class NatureProcessor(BaseProcessor):
         math_span = eq_div.select_one("span.mathjax-tex")
         if math_span:
             eq_content = math_span.get_text(strip=True)
-            eq_content = re.sub(r'^\$+|\$+$', '', eq_content)
+            eq_content = clean_math_formula(eq_content)
             eq_content = normalize_whitespace(eq_content)
             return f"<equation>{eq_content}</equation>"
         return ""
