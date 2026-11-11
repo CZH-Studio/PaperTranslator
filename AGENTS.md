@@ -5,7 +5,8 @@
 ```bash
 python main.py <file_or_url>              # full pipeline: extract → translate → summarize
 python main.py --no-summary <file>        # skip summary generation
-python main.py --summarize-only <path>    # regenerate summary from existing translation.md
+python main.py --no-translation <file>    # English-only markdown, no translation
+python main.py --summarize-only <path>    # regenerate summary from existing translation.md (or paper.md)
 ```
 
 ## Environment
@@ -26,7 +27,7 @@ main.py → router.py → processor (arxiv|biorxiv|ieee|sciencedirect|nature) �
 - **router.py**: detects source type, delegates to processor, writes output files
 - **processors/**: each processor extracts metadata + body from HTML, translates via engine, writes `paper.md` (English), returns translated markdown
 - **engine.py**: `TranslationEngine` — wraps OpenAI-compatible API, glossary protection, batch paragraph translation with `[¶SEP¶]` separator
-- **summarizer.py**: standalone LLM call to summarize `translation.md`
+- **summarizer.py**: standalone LLM call to summarize `translation.md`, falling back to `paper.md` when no translation exists
 
 ## Output layout
 
@@ -34,7 +35,7 @@ main.py → router.py → processor (arxiv|biorxiv|ieee|sciencedirect|nature) �
 output/<sanitized_title>/
 ├── raw.html          # original HTML copy
 ├── paper.md          # extracted English markdown
-├── translation.md    # Chinese translation
+├── translation.md    # Chinese translation (omitted with --no-translation)
 └── summary.md        # Chinese summary (5-section format)
 ```
 

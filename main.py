@@ -34,9 +34,14 @@ def main():
         help="Skip generating summary.md",
     )
     parser.add_argument(
+        "--no-translation",
+        action="store_true",
+        help="Skip translation and only write the English paper.md",
+    )
+    parser.add_argument(
         "--summarize-only",
         metavar="PATH",
-        help="Only generate summary for an existing translation (path to translation.md or its parent directory)",
+        help="Only generate summary from an existing translation.md or paper.md (path to the file or its parent directory)",
     )
     parser.add_argument(
         "-c",
@@ -64,9 +69,11 @@ def main():
             args.input,
             args.output_dir,
             skip_summary=args.no_summary,
+            skip_translation=args.no_translation,
             concurrency=args.concurrency,
         )
-        logger.info(f"Translation saved to: {md_path}")
+        label = "English markdown" if args.no_translation else "Translation"
+        logger.info(f"{label} saved to: {md_path}")
     except Exception as e:
         logger.error(str(e))
         sys.exit(1)
@@ -76,18 +83,26 @@ def cmd_summarize(target: str):
     from summarizer import summarize_markdown
 
     if os.path.isdir(target):
-        md_path = os.path.join(target, "translation.md")
+        translation_path = os.path.join(target, "translation.md")
+        paper_path = os.path.join(target, "paper.md")
+        if os.path.isfile(translation_path):
+            md_path = translation_path
+        elif os.path.isfile(paper_path):
+            md_path = paper_path
+        else:
+            logger.error(f"Error: neither translation.md nor paper.md found in {target}")
+            sys.exit(1)
     else:
         md_path = target
 
     if not os.path.isfile(md_path):
-        logger.error(f"Error: translation.md not found at {md_path}")
+        logger.error(f"Error: markdown file not found at {md_path}")
         sys.exit(1)
 
     parent_dir = os.path.dirname(md_path)
     summary_path = os.path.join(parent_dir, "summary.md")
 
-    logger.info("Generating summary from existing translation...")
+    logger.info(f"Generating summary from {os.path.basename(md_path)}...")
     summary = summarize_markdown(md_path)
 
     with open(summary_path, "w", encoding="utf-8") as f:

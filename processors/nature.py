@@ -161,12 +161,14 @@ class NatureProcessor(BaseProcessor):
         flush_paragraphs()
 
         md_text = "".join(md_parts)
+        paper_text = "".join(paper_parts)
         for key, value in self._placeholders.items():
             md_text = md_text.replace(key, value)
+            paper_text = paper_text.replace(key, value)
 
         raw_path = self.output_dir / "paper.md"
         with open(raw_path, "w", encoding="utf-8") as f:
-            f.write("".join(paper_parts))
+            f.write(paper_text)
 
         self.engine.shutdown()
         return md_text
@@ -182,6 +184,7 @@ class NatureProcessor(BaseProcessor):
             section_title = normalize_whitespace(section_title)
 
         if section_title:
+            flush_paragraphs()
             self._current_heading = section_title
             translated_title = self._translate(section_title)
             md_parts.append(f"## {translated_title}\n\n")

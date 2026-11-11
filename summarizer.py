@@ -10,7 +10,7 @@ def summarize_markdown(md_path: str) -> str:
         content = f.read()
 
     if not content.strip():
-        logger.warning("Empty translation, skipping summary")
+        logger.warning("Empty markdown, skipping summary")
         return ""
 
     chinese_title, english_title = _extract_titles_from_markdown(content)
@@ -32,18 +32,34 @@ def summarize_markdown(md_path: str) -> str:
 
 
 def _extract_titles_from_markdown(content: str) -> tuple[str, str]:
-    """Return (chinese_title, english_title)."""
-    lines = content.split("\n")
+    """Return (chinese_title, english_title) from translated or English markdown."""
     chinese = ""
     english = ""
 
-    if lines and lines[0].startswith("# "):
-        chinese = lines[0][2:].strip()
-
-    for line in lines[1:]:
+    for line in content.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("**") and stripped.endswith("**"):
-            english = stripped.strip("*").strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            if _contains_chinese(title):
+                chinese = chinese or title
+            else:
+                english = english or title
+        elif stripped.startswith("**") and stripped.endswith("**"):
+            title = stripped.strip("*").strip()
+            if title:
+                if _contains_chinese(title):
+                    chinese = chinese or title
+                else:
+                    english = english or title
+
+        if chinese and english:
             break
 
     return chinese, english
+
+
+def _contains_chinese(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)

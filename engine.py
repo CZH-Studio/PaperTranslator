@@ -29,7 +29,7 @@ Guidelines:
 8. Output ONLY the translated text, no explanations."""
 
 
-SUMMARIZE_SYSTEM_PROMPT = """你是一位专业的学术论文解读专家。你的任务是对一篇已翻译为中文的学术论文进行总结。
+SUMMARIZE_SYSTEM_PROMPT = """你是一位专业的学术论文解读专家。你的任务是对一篇学术论文进行总结。输入可能是中文译文，也可能是英文原文，请阅读后直接用简体中文输出总结。
 
 请按以下结构输出总结：
 
@@ -51,7 +51,8 @@ SUMMARIZE_SYSTEM_PROMPT = """你是一位专业的学术论文解读专家。你
 要求：
 1. 语言要通俗易懂，但保持专业性，让非该领域读者也能理解。
 2. 不要逐字翻译原文，而是要提炼精华，用你自己的话（不超过原文长度）。
-3. 直接输出总结内容，不要加任何前言或后记。"""
+3. 直接输出总结内容，不要加任何前言或后记。
+4. 无论输入是中文还是英文，均使用简体中文输出。"""
 
 
 GLOSSARY_PATH = Path(__file__).parent / "glossary.json"
@@ -74,26 +75,33 @@ _GLOSSARY_ITEMS, _GLOSSARY_PATTERN = _load_glossary()
 
 
 class TranslationEngine:
-    def __init__(self, concurrency: int = 1):
-        import httpx
-
-        proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-        http_client = httpx.Client(
-            trust_env=False,
-            proxy=proxy_url,
-        )
-        self.client = OpenAI(
-            api_key=OPENAI_API_KEY,
-            base_url=OPENAI_BASE_URL,
-            http_client=http_client,
-        )
+    def __init__(self, concurrency: int = 1, translate_enabled: bool = True):
+        self.translate_enabled = translate_enabled
+        self._client = None
         self.model_translator = OPENAI_MODEL_TRANSLATOR.strip('"')
         self.model_summarizer = OPENAI_MODEL_SUMMARIZER.strip('"')
         self.concurrency = max(1, concurrency)
-        if self.concurrency > 1:
+        if self.concurrency > 1 and self.translate_enabled:
             self._executor = ThreadPoolExecutor(max_workers=self.concurrency)
         else:
             self._executor = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            import httpx
+
+            proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            http_client = httpx.Client(
+                trust_env=False,
+                proxy=proxy_url,
+            )
+            self._client = OpenAI(
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL,
+                http_client=http_client,
+            )
+        return self._client
 
     def shutdown(self):
         if self._executor is not None:
@@ -153,6 +161,8 @@ class TranslationEngine:
         return text
 
     def translate(self, text: str, context: str = "", max_retries: int = 3) -> str:
+        if not self.translate_enabled:
+            return text
         if not text.strip():
             return text
         protected, mapping = self._apply_glossary_bulk(text)
@@ -217,6 +227,8 @@ class TranslationEngine:
     def translate_paragraphs(
         self, paragraphs: list[str], context: str = "", sep: str = "[¶SEP¶]"
     ) -> list[str]:
+        if not self.translate_enabled:
+            return list(paragraphs)
         if not paragraphs:
             return []
 

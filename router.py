@@ -17,22 +17,69 @@ logger = logging.getLogger(__name__)
 
 TRANSLATION_FILENAME = "translation.md"
 SUMMARY_FILENAME = "summary.md"
+PAPER_FILENAME = "paper.md"
+
+
+def _make_engine(concurrency: int, skip_translation: bool):
+    from engine import TranslationEngine
+
+    return TranslationEngine(
+        concurrency=concurrency,
+        translate_enabled=not skip_translation,
+    )
+
+
+def _log_processing(skip_translation: bool):
+    if skip_translation:
+        logger.info("Translation disabled, extracting English markdown only...")
+    else:
+        logger.info(
+            f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
+        )
+
+
+def _save_markdown(output_dir: Path, md_content: str, skip_translation: bool) -> Path:
+    if skip_translation:
+        md_path = output_dir / PAPER_FILENAME
+        if not md_path.is_file():
+            raise FileNotFoundError(
+                f"English markdown was not generated: {md_path}"
+            )
+        logger.info(f"English markdown saved to: {md_path}")
+        return md_path
+
+    md_path = output_dir / TRANSLATION_FILENAME
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    logger.info(f"Translation complete: {md_path}")
+    return md_path
 
 
 def route(
     input_path: str, output_base: str = "output", skip_summary: bool = False,
-    concurrency: int = 10
+    concurrency: int = 10, skip_translation: bool = False
 ) -> str:
     is_url = input_path.startswith("http://") or input_path.startswith("https://")
 
     if is_url:
-        return _route_url(input_path, output_base, skip_summary, concurrency)
+        return _route_url(
+            input_path, output_base,
+            skip_summary=skip_summary,
+            skip_translation=skip_translation,
+            concurrency=concurrency,
+        )
     else:
-        return _route_file(input_path, output_base, skip_summary, concurrency)
+        return _route_file(
+            input_path, output_base,
+            skip_summary=skip_summary,
+            skip_translation=skip_translation,
+            concurrency=concurrency,
+        )
 
 
 def _route_url(url: str, output_base: str, skip_summary: bool,
-               concurrency: int) -> str:
+               skip_translation: bool, concurrency: int) -> str:
     if "nature.com" not in url and "springer.com" not in url:
         raise ValueError(f"Unsupported URL (supported: nature.com, link.springer.com): {url}")
 
@@ -47,13 +94,34 @@ def _route_url(url: str, output_base: str, skip_summary: bool,
         html_path = copy_file_to_output(html_path, str(output_dir), "raw.html")
         logger.info(f"Moved HTML to {html_path}")
 
-        return _translate_and_summarize(html_path, output_dir, skip_summary, concurrency)
+        return _translate_and_summarize(
+            html_path, output_dir,
+            skip_summary=skip_summary,
+            skip_translation=skip_translation,
+            concurrency=concurrency,
+        )
 
 
 def _route_file(filepath: str, output_base: str, skip_summary: bool,
-                concurrency: int) -> str:
+                skip_translation: bool, concurrency: int) -> str:
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
+
+    # PDF files: use filename as title (no HTML extraction)
+    if filepath.lower().endswith(".pdf"):
+        title = Path(filepath).stem
+        dir_name = sanitize_filename(title)
+        output_dir = ensure_output_dir(dir_name, output_base)
+        pdf_path = copy_file_to_output(filepath, str(output_dir), "raw.pdf")
+        logger.info(f"Copied PDF to {pdf_path}")
+        md_path = _process_pdf(
+            pdf_path, output_dir,
+            concurrency=concurrency,
+            skip_translation=skip_translation,
+        )
+        if not skip_summary:
+            _run_summarizer(output_dir, md_path)
+        return str(md_path)
 
     title = extract_title_from_html(filepath)
     dir_name = sanitize_filename(title)
@@ -62,7 +130,12 @@ def _route_file(filepath: str, output_base: str, skip_summary: bool,
     html_path = copy_file_to_output(filepath, str(output_dir), f"raw.html")
     logger.info(f"Copied HTML to {html_path}")
 
-    md_path = _translate_and_summarize(html_path, output_dir, skip_summary, concurrency)
+    md_path = _translate_and_summarize(
+        html_path, output_dir,
+        skip_summary=skip_summary,
+        skip_translation=skip_translation,
+        concurrency=concurrency,
+    )
     n = relocate_assets(filepath, output_dir)
     if n > 0:
         logger.info(f"Relocated {n} asset(s) to {output_dir / 'assets'}")
@@ -71,26 +144,43 @@ def _route_file(filepath: str, output_base: str, skip_summary: bool,
 
 
 def _translate_and_summarize(
-    html_path: str, output_dir: Path, skip_summary: bool, concurrency: int
+    html_path: str, output_dir: Path, skip_summary: bool, skip_translation: bool,
+    concurrency: int
 ) -> str:
     if _is_arxiv(html_path):
-        md_path = _process_arxiv(html_path, output_dir, concurrency)
+        md_path = _process_arxiv(html_path, output_dir, concurrency, skip_translation)
     elif _is_biorxiv(html_path):
-        md_path = _process_biorxiv(html_path, output_dir, concurrency)
+        md_path = _process_biorxiv(html_path, output_dir, concurrency, skip_translation)
     elif _is_ieee(html_path):
-        md_path = _process_ieee(html_path, output_dir, concurrency)
+        md_path = _process_ieee(html_path, output_dir, concurrency, skip_translation)
     elif _is_sciencedirect(html_path):
-        md_path = _process_sciencedirect(html_path, output_dir, concurrency)
+        md_path = _process_sciencedirect(html_path, output_dir, concurrency, skip_translation)
     elif _is_iopscience(html_path):
-        md_path = _process_iopscience(html_path, output_dir, concurrency)
+        md_path = _process_iopscience(html_path, output_dir, concurrency, skip_translation)
     elif _is_mdpi(html_path):
-        md_path = _process_mdpi(html_path, output_dir, concurrency)
+        md_path = _process_mdpi(html_path, output_dir, concurrency, skip_translation)
+    elif _is_frontiers(html_path):
+        md_path = _process_frontiers(html_path, output_dir, concurrency, skip_translation)
     elif _is_springer(html_path):
-        md_path = _process_springer(html_path, output_dir, concurrency)
+        md_path = _process_springer(html_path, output_dir, concurrency, skip_translation)
     elif _is_pnas(html_path):
-        md_path = _process_pnas(html_path, output_dir, concurrency)
+        md_path = _process_pnas(html_path, output_dir, concurrency, skip_translation)
+    elif _is_spie(html_path):
+        md_path = _process_spie(html_path, output_dir, concurrency, skip_translation)
+    elif _is_plos_one(html_path):
+        md_path = _process_plos_one(html_path, output_dir, concurrency, skip_translation)
+    elif _is_sage(html_path):
+        md_path = _process_sage(html_path, output_dir, concurrency, skip_translation)
+    elif _is_cell(html_path):
+        md_path = _process_cell(html_path, output_dir, concurrency, skip_translation)
+    elif _is_jneurosci(html_path):
+        md_path = _process_jneurosci(html_path, output_dir, concurrency, skip_translation)
+    elif _is_elife(html_path):
+        md_path = _process_elife(html_path, output_dir, concurrency, skip_translation)
+    elif _is_mitpress(html_path):
+        md_path = _process_mitpress(html_path, output_dir, concurrency, skip_translation)
     else:
-        md_path = _process_nature(html_path, output_dir, concurrency)
+        md_path = _process_nature(html_path, output_dir, concurrency, skip_translation)
 
     n = relocate_assets(html_path, output_dir)
     if n > 0:
@@ -219,6 +309,24 @@ def _is_mdpi(filepath: str) -> bool:
     return False
 
 
+def _is_frontiers(filepath: str) -> bool:
+    basename = os.path.basename(filepath).lower()
+    if "frontiers" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "frontiersin.org" in head:
+            return True
+        if 'name="citation_publisher" content="Frontiers"' in head:
+            return True
+        if "ArticleContent" in head and "ArticleFigure" in head:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _is_springer(filepath: str) -> bool:
     basename = os.path.basename(filepath).lower()
     keywords = ["springer", "springerlink"]
@@ -259,191 +367,395 @@ def _is_pnas(filepath: str) -> bool:
     return False
 
 
+def _is_spie(filepath: str) -> bool:
+    basename = os.path.basename(filepath).lower()
+    if "spie" in basename or "spiedigitallibrary" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "spiedigitallibrary.org" in head:
+            return True
+        if 'name="citation_publisher" content="SPIE"' in head:
+            return True
+        if "SPIE Digital Library" in head:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_plos_one(filepath: str) -> bool:
+    basename = os.path.basename(filepath).lower()
+    if "plos" in basename and "one" in basename:
+        return True
+    if "plosone" in basename or "plos_one" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "journals.plos.org/plosone" in head:
+            return True
+        if 'content="PLOS ONE"' in head or 'content="PLOS ONE' in head:
+            return True
+        if 'name="citation_journal_title" content="PLOS ONE"' in head:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_sage(filepath: str) -> bool:
+    """Detect SAGE Journals articles (sagepub.com). Same HTML structure as Cell Press."""
+    basename = os.path.basename(filepath).lower()
+    if "sage" in basename and "sagepub" not in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "sagepub.com" in head or "journals.sagepub.com" in head:
+            return True
+        if 'name="citation_publisher" content="SAGE' in head:
+            return True
+        # Structural marker: bodymatter but NOT author-abstract (Cell has author-abstract, SAGE doesn't)
+        if 'section id="bodymatter"' in head and 'div role="paragraph"' in head:
+            if 'section id="author-abstract"' not in head:
+                if "sagepub.com" in head or "SAGE" in head:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _process_sage(html_path: str, output_dir: Path,
+                  concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.cell import CellProcessor
+
+    logger.info("Processing as SAGE Journals article...")
+    processor = CellProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _is_cell(filepath: str) -> bool:
+    """Detect Current Biology / Cell Press articles (cell.com)."""
+    basename = os.path.basename(filepath).lower()
+    keywords = ["cell", "current-biology", "current_biology", "cellpress"]
+    for kw in keywords:
+        if kw in basename:
+            return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "cell.com" in head:
+            return True
+        # Cell Press meta markers
+        if ('name="citation_journal_title"' in head
+                and ('Current Biology' in head or 'Cell Reports' in head
+                     or 'Molecular Cell' in head or 'Neuron' in head
+                     or 'Developmental Cell' in head or 'Cell' in head)):
+            return True
+        # Structural markers
+        if 'section id="bodymatter"' in head and 'section id="author-abstract"' in head:
+            return True
+        if 'div role="paragraph"' in head and 'name="citation_doi"' in head:
+            if 'dropBlock' in head or 'reference-citations' in head:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_jneurosci(filepath: str) -> bool:
+    """Detect Journal of Neuroscience / HighWire Press articles (jneurosci.org)."""
+    basename = os.path.basename(filepath).lower()
+    if "jneurosci" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "jneurosci.org" in head:
+            return True
+        if ('name="citation_journal_title" content="Journal of Neuroscience"' in head
+                or "name='citation_journal_title' content='Journal of Neuroscience'" in head):
+            return True
+        if "highwire-cite-title" in head or "content-block-markup" in head:
+            if "citation_journal_title" in head:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_elife(filepath: str) -> bool:
+    basename = os.path.basename(filepath).lower()
+    if "elife" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if "elifesciences.org" in head:
+            return True
+        if 'name="dc.publisher" content="eLife' in head:
+            return True
+        if 'content="eLife Sciences Publications"' in head:
+            return True
+        if 'name="dc.title"' in head and "article-section" in head:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_mitpress(filepath: str) -> bool:
+    basename = os.path.basename(filepath).lower()
+    keywords = ["mit press", "mitpress", "jocn", "jnocn"]
+    for kw in keywords:
+        if kw in basename:
+            return True
+    if "imaging neuroscience" in basename:
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8192)
+        if 'name="citation_publisher" content="MIT Press"' in head:
+            return True
+        if "direct.mit.edu" in head:
+            return True
+        if "silverchair-cdn.com" in head and "mitp" in head:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _process_elife(html_path: str, output_dir: Path,
+                   concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.elife import ElifeProcessor
+
+    logger.info("Processing as eLife article...")
+    processor = ElifeProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_mitpress(html_path: str, output_dir: Path,
+                      concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.mitpress import MitPressProcessor
+
+    logger.info("Processing as MIT Press article...")
+    processor = MitPressProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_pdf(pdf_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.pdf import PdfProcessor
+
+    logger.info("Processing as PDF document...")
+    processor = PdfProcessor(pdf_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_spie(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.spie import SpieProcessor
+
+    logger.info("Processing as SPIE Digital Library article...")
+    processor = SpieProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_plos_one(html_path: str, output_dir: Path,
+                       concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.plos_one import PlosOneProcessor
+
+    logger.info("Processing as PLOS ONE article...")
+    processor = PlosOneProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_cell(html_path: str, output_dir: Path,
+                  concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.cell import CellProcessor
+
+    logger.info("Processing as Current Biology / Cell Press article...")
+    processor = CellProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
 def _process_nature(html_path: str, output_dir: Path,
-                    concurrency: int) -> Path:
+                    concurrency: int, skip_translation: bool = False) -> Path:
     from processors.nature import NatureProcessor
 
     logger.info("Processing as Nature article...")
-    processor = NatureProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = NatureProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_arxiv(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_arxiv(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.arxiv import ArxivProcessor
 
     logger.info("Processing as arXiv article...")
-    processor = ArxivProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = ArxivProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_biorxiv(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_biorxiv(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.biorxiv import BiorxivProcessor
 
     logger.info("Processing as bioRxiv article...")
-    processor = BiorxivProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = BiorxivProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_sciencedirect(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_sciencedirect(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.sciencedirect import ScienceDirectProcessor
 
     logger.info("Processing as ScienceDirect article...")
-    processor = ScienceDirectProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = ScienceDirectProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_ieee(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_ieee(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.ieee import IEEEXploreProcessor
 
     logger.info("Processing as IEEE Xplore article...")
-    processor = IEEEXploreProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = IEEEXploreProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_iopscience(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_iopscience(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.iopscience import IopscienceProcessor
 
     logger.info("Processing as IOPScience article...")
-    processor = IopscienceProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = IopscienceProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_mdpi(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_frontiers(html_path: str, output_dir: Path,
+                       concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.frontiers import FrontiersProcessor
+
+    logger.info("Processing as Frontiers article...")
+    processor = FrontiersProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _process_mdpi(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.mdpi import MdpiProcessor
 
     logger.info("Processing as MDPI article...")
-    processor = MdpiProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = MdpiProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
 def _process_springer(html_path: str, output_dir: Path,
-                      concurrency: int) -> Path:
+                      concurrency: int, skip_translation: bool = False) -> Path:
     from processors.springer import SpringerProcessor
 
     logger.info("Processing as Springer Nature Link article...")
-    processor = SpringerProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = SpringerProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _process_pnas(html_path: str, output_dir: Path, concurrency: int) -> Path:
+def _process_pnas(html_path: str, output_dir: Path, concurrency: int, skip_translation: bool = False) -> Path:
     from processors.pnas import PnasProcessor
 
     logger.info("Processing as PNAS article...")
-    processor = PnasProcessor(html_path, output_dir, concurrency=concurrency)
+    processor = PnasProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
     
 
-    logger.info(
-        f"Translating paper by {OPENAI_MODEL_TRANSLATOR} (this may take a while)..."
-    )
+    _log_processing(skip_translation)
     md_content = processor.extract_and_translate()
 
-    md_path = output_dir / TRANSLATION_FILENAME
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    logger.info(f"Translation complete: {md_path}")
-    return md_path
+    return _save_markdown(output_dir, md_content, skip_translation)
 
 
-def _run_summarizer(output_dir: Path, translation_path: Path):
+def _process_jneurosci(html_path: str, output_dir: Path,
+                       concurrency: int, skip_translation: bool = False) -> Path:
+    from processors.jneurosci import JNeurosciProcessor
+
+    logger.info("Processing as Journal of Neuroscience article...")
+    processor = JNeurosciProcessor(html_path, output_dir, concurrency=concurrency, engine=_make_engine(concurrency, skip_translation))
+
+    _log_processing(skip_translation)
+    md_content = processor.extract_and_translate()
+
+    return _save_markdown(output_dir, md_content, skip_translation)
+
+
+def _run_summarizer(output_dir: Path, markdown_path: Path):
     from summarizer import summarize_markdown
 
-    logger.info("Generating summary...")
-    summary = summarize_markdown(str(translation_path))
+    logger.info(f"Generating summary from {markdown_path.name}...")
+    summary = summarize_markdown(str(markdown_path))
     summary_path = output_dir / SUMMARY_FILENAME
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(summary)

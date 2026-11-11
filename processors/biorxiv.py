@@ -215,6 +215,30 @@ class BiorxivProcessor(BaseProcessor):
 
             elif child.name == "div" and "section" in (child.get("class") or []):
                 pass
+            elif child.name == "div" and "subsection" in (child.get("class") or []):
+                for inner in child.children:
+                    if isinstance(inner, NavigableString):
+                        continue
+                    if not isinstance(inner, Tag):
+                        continue
+                    if inner.name == "h3":
+                        if paragraphs:
+                            translated_paras = self.engine.translate_paragraphs(paragraphs, context=f"{self._title} - {self._current_heading}")
+                            self._append_paragraphs(translated_paras, paragraphs, md_parts, paper_parts)
+                            paragraphs.clear()
+                        sub_heading = clean_html_entities(inner.get_text(strip=True))
+                        sub_heading = normalize_whitespace(sub_heading)
+                        if sub_heading:
+                            self._current_heading = sub_heading
+                            translated_sub = self._translate(sub_heading)
+                            md_parts.append(f"### {translated_sub}\n\n")
+                            paper_parts.append(f"### {sub_heading}\n\n")
+                    elif inner.name == "p":
+                        self._strip_formulas(inner)
+                        text = clean_html_entities(inner.get_text(" ", strip=True))
+                        text = normalize_whitespace(text)
+                        if text:
+                            paragraphs.append(text)
 
         if paragraphs:
             translated_paras = self.engine.translate_paragraphs(paragraphs)

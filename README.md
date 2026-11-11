@@ -2,7 +2,7 @@
 
 ## 使用方法
 ```
-usage: main.py [-h] [--output-dir OUTPUT_DIR] [--no-summary] [--summarize-only PATH] [-c CONCURRENCY] [input]
+usage: main.py [-h] [--output-dir OUTPUT_DIR] [--no-summary] [--no-translation] [--summarize-only PATH] [-c CONCURRENCY] [input]
 
 Translate academic papers from HTML to Chinese Markdown.
 
@@ -14,8 +14,9 @@ options:
   --output-dir OUTPUT_DIR
                         Output directory (default: output/)
   --no-summary          Skip generating summary.md
+  --no-translation      Skip translation and only write the English paper.md
   --summarize-only PATH
-                        Only generate summary for an existing translation (path to translation.md or its parent directory)
+                        Only generate summary from an existing translation.md or paper.md (path to the file or its parent directory)
   -c, --concurrency CONCURRENCY
                         Number of concurrent translation requests (default: 10)
 ```
@@ -27,6 +28,8 @@ options:
 2. `paper.md`：原始英文论文内容
 3. `translation.md`：翻译的中文论文内容
 4. `summary.md`：总结（含论文标题的一级标题，结论附通俗解释）
+
+使用 `--no-translation` 时会跳过翻译，只生成 `paper.md`（不生成 `translation.md`）；此时若启用总结，则直接基于英文 `paper.md` 生成中文总结。总结生成时优先使用中文 `translation.md`，没有中文翻译时才回退到英文 `paper.md`。`--no-translation` 与 `--no-summary` 可任意组合。
 
 翻译支持上下文感知（论文标题+章节名），提高术语一致性。支持并发翻译（`-c` 参数），可大幅加快翻译速度。
 
@@ -41,4 +44,7 @@ options:
 6. MDPI
 7. PNAS
 8. Springer Nature Link
-9. Nature（default）
+9. Frontiers
+10. SPIE Digital Library
+11. PLOS ONE
+12. Nature（default）
